@@ -9,7 +9,7 @@ export class WorkerOrchestrator {
   private pollIntervalMs = 5000;
 
   constructor() {
-    this.docker = new Docker({ socketPath: '/var/run/docker.sock' }); // Standard local Docker socket
+    this.docker = new Docker(); // Standard local Docker socket
   }
 
   /**
