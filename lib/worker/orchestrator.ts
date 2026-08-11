@@ -22,7 +22,7 @@ export class WorkerOrchestrator {
 
     while (this.isPolling) {
       try {
-        await this.pollQueue();
+        await this.processNextJob();
       } catch (error) {
         logger.error({ event: 'orchestrator_poll_error', error: String(error) });
       }
@@ -41,9 +41,9 @@ export class WorkerOrchestrator {
   }
 
   /**
-   * Queries Supabase for the oldest pending job and locks it.
+   * Queries Supabase for the oldest pending job, locks it, and processes it.
    */
-  private async pollQueue() {
+  public async processNextJob(): Promise<void> {
     const supabase = createServerSupabaseClient();
 
     // Fetch oldest pending job
@@ -112,18 +112,12 @@ export class WorkerOrchestrator {
         throw new Error('Failed to establish ADB connection to ReDroid container');
       }
 
-      // 3. Mobile Execution Placeholder
+      // 3. Mobile Execution
       logger.info({ event: 'mobile_execution_started', jobId: job.id });
 
-      // Placeholder: Install App (Assuming local path for now)
-      // await adbBridge.installApp('/assets/apps/linkedin.apk');
-
-      // Placeholder: Launch App
-      // await adbBridge.launchApp('com.linkedin.android');
-
-      // Placeholder: Execute Shell (e.g. dump UI)
-      // const uiDump = await adbBridge.executeShellCommand('uiautomator dump');
-      // logger.debug({ event: 'ui_dump', uiDump });
+      // Execute the test shell command to prove the bridge works
+      const androidVersion = await adbBridge.executeShellCommand('getprop ro.build.version.release');
+      logger.info({ event: 'mobile_execution_test_command', result: androidVersion, command: 'getprop ro.build.version.release' });
 
       logger.info({ event: 'mobile_execution_completed', jobId: job.id });
 
@@ -160,7 +154,7 @@ export class WorkerOrchestrator {
       Image: 'redroid/redroid:11.0.0-latest',
       name: `redroid-worker-${jobId.substring(0, 8)}`,
       HostConfig: {
-        Privileged: true, // ReDroid often requires privileged mode to run binder/ashmem
+        Privileged: true, // ReDroid requires privileged mode to run Android's init system
         PortBindings: {
           '5555/tcp': [
             { HostPort: '' } // Leave blank for Docker to assign an ephemeral port
