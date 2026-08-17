@@ -1,0 +1,28 @@
+
+> tmp_app@0.1.0 dev
+> next dev
+
+  ▲ Next.js 14.2.5
+  - Local:        http://localhost:3000
+  - Environments: .env
+
+ ✓ Starting...
+ ✓ Ready in 2.2s
+ ○ Compiling /api/v1/webhooks/[channel] ...
+ ✓ Compiled /api/v1/webhooks/[channel] in 2.2s (146 modules)
+{"timestamp":"2026-08-11T17:59:39.298Z","level":"info","channel":"telegram","event":"webhook_received"}
+{"timestamp":"2026-08-11T17:59:39.301Z","level":"info","channel":"telegram","event":"message_normalized","message":{"userId":"123456789","channelType":"telegram","rawText":"/summary https://linkedin.com/in/test","commandType":"profile_summary","metadata":{"chatId":"123456789","messageId":1,"username":"testuser"}}}
+Error in getOrCreateUserByChannel: {
+  message: 'TypeError: fetch failed',
+  details: 'TypeError: fetch failed\n' +
+    '\n' +
+    'Caused by: AggregateError:  (ECONNREFUSED)\n' +
+    'AggregateError [ECONNREFUSED]: \n' +
+    '    at internalConnectMultiple (node:net:1134:18)\n' +
+    '    at afterConnectMultiple (node:net:1715:7)\n' +
+    '    at TCPConnectWrap.callbackTrampoline (node:internal/async_hooks:130:17)',
+  hint: '',
+  code: ''
+}
+{"timestamp":"2026-08-11T17:59:39.339Z","level":"error","channel":"telegram","event":"user_resolution_failed"}
+ POST /api/v1/webhooks/telegram 500 in 3628ms
