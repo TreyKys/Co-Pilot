@@ -1,4 +1,3 @@
-import { Stagehand } from '@browserbasehq/stagehand';
 import { z } from 'zod';
 import { logger } from '../../logger';
 
@@ -22,9 +21,12 @@ export const ProfileDataSchema = z.object({
 
 export class StagehandEngine {
   public async extractProfile(targetUrl: string, cookieValue: string): Promise<{ data: LinkedInProfileData | null, challengeDetected: boolean, error?: string }> {
-    let stagehand: Stagehand | null = null;
+    let stagehand: any = null;
     try {
       logger.info({ event: 'stagehand_init_started' });
+
+      // Dynamically import Stagehand to bypass CJS static import block for ESM-only packages
+      const { Stagehand } = await import('@browserbasehq/stagehand');
 
       // Create and initialize the Stagehand instance
       stagehand = await Stagehand.create({
@@ -34,7 +36,7 @@ export class StagehandEngine {
 
       logger.info({ event: 'stagehand_init_success' });
 
-      const page: any = (stagehand as any).page;
+      const page: any = stagehand.page;
       const context = page.context();
 
       // Inject the authentication cookie dynamically from RAM
@@ -52,7 +54,7 @@ export class StagehandEngine {
 
       logger.info({ event: 'navigating_to_target', url: targetUrl });
 
-      const response = await page.goto(targetUrl, { waitUntil: 'domcontentloaded' });
+      await page.goto(targetUrl, { waitUntil: 'domcontentloaded' });
 
       // Check for captchas or challenge redirects
       const pageUrl = page.url();
