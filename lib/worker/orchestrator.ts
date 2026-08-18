@@ -27,7 +27,7 @@ export class WorkerOrchestrator {
         logger.error({ event: 'orchestrator_poll_error', error: String(error) });
       }
 
-      // Wait before the next poll
+      // Wait before the next poll asynchronously
       await new Promise(resolve => setTimeout(resolve, this.pollIntervalMs));
     }
   }
@@ -75,6 +75,7 @@ export class WorkerOrchestrator {
       .eq('status', 'pending') // Optimistic locking
       .select('id');
 
+    // Make sure we actually locked it! If another worker grabbed it, updatedJobs might be empty.
     if (updateError || !updatedJobs || updatedJobs.length === 0) {
       logger.warn({ event: 'job_lock_failed_or_stolen', jobId: job.id });
       return;
@@ -82,7 +83,7 @@ export class WorkerOrchestrator {
 
     logger.info({ event: 'job_locked', jobId: job.id });
 
-    // Process the job
+    // Process the job sequentially, blocking the next iteration of the start loop
     await this.processJob(job);
   }
 
@@ -107,6 +108,7 @@ export class WorkerOrchestrator {
       const hostIp = '127.0.0.1';
       adbBridge = new AdbBridge(hostIp, hostPort);
 
+      // Connect using asynchronous sleep in the retry block
       const connected = await adbBridge.connect(15, 3000); // 45 seconds total wait time for boot
       if (!connected) {
         throw new Error('Failed to establish ADB connection to ReDroid container');
