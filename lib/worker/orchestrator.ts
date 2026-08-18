@@ -1,15 +1,17 @@
-import Docker from 'dockerode';
 import { createServerSupabaseClient } from '../supabase/server';
-import { AdbBridge } from './adbBridge';
+import { DualEngineDispatcher } from './dispatcher';
 import { logger } from '../logger';
 
 export class WorkerOrchestrator {
-  private docker: Docker;
   private isPolling = false;
   private pollIntervalMs = 5000;
+  private dispatcher: DualEngineDispatcher;
+
+  private MAX_CONCURRENT_JOBS = 5;
+  private activeJobsCount = 0;
 
   constructor() {
-    this.docker = new Docker(); // Standard local Docker socket
+    this.dispatcher = new DualEngineDispatcher();
   }
 
   /**
@@ -18,11 +20,15 @@ export class WorkerOrchestrator {
   async start() {
     if (this.isPolling) return;
     this.isPolling = true;
-    logger.info({ event: 'orchestrator_started', pollIntervalMs: this.pollIntervalMs });
+    logger.info({ event: 'orchestrator_started', pollIntervalMs: this.pollIntervalMs, maxConcurrent: this.MAX_CONCURRENT_JOBS });
 
     while (this.isPolling) {
       try {
-        await this.processNextJob();
+        if (this.activeJobsCount < this.MAX_CONCURRENT_JOBS) {
+          await this.processNextJob();
+        } else {
+          logger.debug({ event: 'max_concurrency_reached', count: this.activeJobsCount });
+        }
       } catch (error) {
         logger.error({ event: 'orchestrator_poll_error', error: String(error) });
       }
@@ -46,7 +52,7 @@ export class WorkerOrchestrator {
   public async processNextJob(): Promise<void> {
     const supabase = createServerSupabaseClient();
 
-    // Fetch oldest pending job
+    // Fetch oldest pending job.
     const { data: jobs, error: fetchError } = await supabase
       .from('job_queue')
       .select('*')
@@ -66,8 +72,6 @@ export class WorkerOrchestrator {
     logger.info({ event: 'job_found', jobId: job.id, action: job.action_type });
 
     // Try to lock it by updating status to processing
-    // NOTE: In a highly concurrent multi-worker setup, this needs an RPC using SELECT FOR UPDATE
-    // but for this phase, a simple update with status match check prevents basic collisions.
     const { data: updatedJobs, error: updateError } = await supabase
       .from('job_queue')
       .update({ status: 'processing' })
@@ -75,7 +79,6 @@ export class WorkerOrchestrator {
       .eq('status', 'pending') // Optimistic locking
       .select('id');
 
-    // Make sure we actually locked it! If another worker grabbed it, updatedJobs might be empty.
     if (updateError || !updatedJobs || updatedJobs.length === 0) {
       logger.warn({ event: 'job_lock_failed_or_stolen', jobId: job.id });
       return;
@@ -83,122 +86,104 @@ export class WorkerOrchestrator {
 
     logger.info({ event: 'job_locked', jobId: job.id });
 
-    // Process the job sequentially, blocking the next iteration of the start loop
-    await this.processJob(job);
+    // We do NOT await processJob here so we can process concurrently up to MAX_CONCURRENT_JOBS.
+    this.activeJobsCount++;
+    this.processJob(job).catch(err => {
+      logger.error({ event: 'unhandled_job_error', jobId: job.id, error: String(err) });
+    });
   }
 
   /**
-   * Orchestrates the container lifecycle and mobile execution.
+   * Orchestrates the execution via the DualEngineDispatcher and updates DB status.
    */
   private async processJob(job: any) {
-    let container: Docker.Container | null = null;
-    let adbBridge: AdbBridge | null = null;
-    let jobStatus: 'completed' | 'failed' = 'failed';
     const supabase = createServerSupabaseClient();
 
+    let mode: 'auto' | 'fast' | 'stealth' = 'auto';
+    let url = '';
+    let callbackUrl = '';
+    let tgChatId: number | null = null;
+
     try {
-      // 1. Spawn Container
-      logger.info({ event: 'spawning_container', jobId: job.id });
-      const { container: newContainer, hostPort } = await this.spawnContainer(job.id);
-      container = newContainer;
+        if (job.payload && typeof job.payload === 'object') {
+           if (job.payload.mode) mode = job.payload.mode;
+           if (job.payload.url) url = job.payload.url;
+           if (job.payload.callbackUrl) callbackUrl = job.payload.callbackUrl;
+           if (job.payload.tgChatId) tgChatId = job.payload.tgChatId;
+        } else if (job.payload && typeof job.payload === 'string') {
+           const parsed = JSON.parse(job.payload);
+           if (parsed.mode) mode = parsed.mode;
+           if (parsed.url) url = parsed.url;
+           if (parsed.callbackUrl) callbackUrl = parsed.callbackUrl;
+           if (parsed.tgChatId) tgChatId = parsed.tgChatId;
+        }
+    } catch(e) {
+       // fallback defaults
+    }
 
-      // 2. Connect ADB
-      // Assuming Docker is running locally; IP is 127.0.0.1.
-      // If running inside a container, host.docker.internal or a bridge IP might be needed.
-      const hostIp = '127.0.0.1';
-      adbBridge = new AdbBridge(hostIp, hostPort);
+    if (!url) {
+       logger.error({ event: 'job_missing_url', jobId: job.id });
+       await supabase.from('job_queue').update({ status: 'failed', completed_at: new Date().toISOString() }).eq('id', job.id);
+       this.activeJobsCount--;
+       return;
+    }
 
-      // Connect using asynchronous sleep in the retry block
-      const connected = await adbBridge.connect(15, 3000); // 45 seconds total wait time for boot
-      if (!connected) {
-        throw new Error('Failed to establish ADB connection to ReDroid container');
+    try {
+      const cookieValue = process.env.LINKEDIN_LI_AT_COOKIE || '';
+
+      const result = await this.dispatcher.dispatch(job.id, url, mode, cookieValue);
+
+      logger.info({ event: 'job_execution_finished', jobId: job.id, success: result.success, engine: result.engineUsed });
+
+      const finalStatus = result.success ? 'completed' : 'failed';
+      const resultPayload = result.data || { error: result.error };
+
+      // Update the job with the result and status
+      await supabase
+        .from('job_queue')
+        .update({
+          status: finalStatus,
+          result_payload: resultPayload,
+          completed_at: new Date().toISOString()
+        })
+        .eq('id', job.id);
+
+      // Webhook outbound delivery
+      if (callbackUrl) {
+         fetch(callbackUrl, {
+           method: 'POST',
+           headers: { 'Content-Type': 'application/json' },
+           body: JSON.stringify({ jobId: job.id, status: finalStatus, result: resultPayload })
+         }).catch(e => logger.error({ event: 'webhook_delivery_error', url: callbackUrl, error: e.message }));
       }
 
-      // 3. Mobile Execution
-      logger.info({ event: 'mobile_execution_started', jobId: job.id });
+      // Telegram Real-time Feedback
+      if (tgChatId && process.env.TELEGRAM_BOT_TOKEN) {
+         let messageText = `Job ${job.id} failed: ${result.error || 'Unknown error'}`;
+         if (result.success && result.data) {
+             const d = result.data;
+             if (result.engineUsed === 'stagehand') {
+                 messageText = `✅ Extraction Complete!\n\nName: ${d.fullName}\nHeadline: ${d.headline}\nLocation: ${d.location}\nSummary: ${d.summary?.substring(0,100)}...`;
+             } else {
+                 messageText = `✅ Mobile Stealth Extraction Complete!\n\nDump: ${d.rawTextDump?.substring(0, 150)}...`;
+             }
+         }
 
-      // Execute the test shell command to prove the bridge works
-      const androidVersion = await adbBridge.executeShellCommand('getprop ro.build.version.release');
-      logger.info({ event: 'mobile_execution_test_command', result: androidVersion, command: 'getprop ro.build.version.release' });
-
-      logger.info({ event: 'mobile_execution_completed', jobId: job.id });
-
-      jobStatus = 'completed';
+         fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+           method: 'POST',
+           headers: { 'Content-Type': 'application/json' },
+           body: JSON.stringify({ chat_id: tgChatId, text: messageText })
+         }).catch(e => logger.error({ event: 'tg_completion_notify_error', error: e.message }));
+      }
 
     } catch (error) {
       logger.error({ event: 'job_processing_error', jobId: job.id, error: String(error) });
-      jobStatus = 'failed';
-    } finally {
-      // 4. Teardown & Update Status
-
-      if (adbBridge) {
-        await adbBridge.disconnect();
-      }
-
-      if (container) {
-        await this.teardownContainer(container);
-      }
-
-      logger.info({ event: 'updating_job_status', jobId: job.id, status: jobStatus });
       await supabase
         .from('job_queue')
-        .update({ status: jobStatus, completed_at: new Date().toISOString() })
+        .update({ status: 'failed', completed_at: new Date().toISOString() })
         .eq('id', job.id);
-    }
-  }
-
-  /**
-   * Spawns a new ReDroid container and returns the container instance and dynamically assigned host port.
-   */
-  private async spawnContainer(jobId: string): Promise<{ container: Docker.Container, hostPort: string }> {
-    // Note: ensure 'redroid/redroid:11.0.0-latest' is pulled locally.
-    const container = await this.docker.createContainer({
-      Image: 'redroid/redroid:11.0.0-latest',
-      name: `redroid-worker-${jobId.substring(0, 8)}`,
-      HostConfig: {
-        Privileged: true, // ReDroid requires privileged mode to run Android's init system
-        PortBindings: {
-          '5555/tcp': [
-            { HostPort: '' } // Leave blank for Docker to assign an ephemeral port
-          ]
-        }
-      }
-    });
-
-    await container.start();
-
-    // Inspect to find the dynamically assigned port
-    const data = await container.inspect();
-    const ports = data.NetworkSettings.Ports['5555/tcp'];
-
-    if (!ports || ports.length === 0) {
-      throw new Error('Failed to find bound host port for container ADB');
-    }
-
-    const hostPort = ports[0].HostPort;
-    logger.info({ event: 'container_spawned', containerId: container.id, hostPort });
-
-    return { container, hostPort };
-  }
-
-  /**
-   * Forcefully stops and removes a container.
-   */
-  private async teardownContainer(container: Docker.Container) {
-    try {
-      logger.info({ event: 'teardown_container', containerId: container.id });
-      await container.stop({ t: 1 }); // 1 second timeout before SIGKILL
-    } catch (error: any) {
-      // Ignore "container already stopped" (304) errors
-      if (error.statusCode !== 304) {
-        logger.warn({ event: 'container_stop_error', error: String(error) });
-      }
-    }
-
-    try {
-      await container.remove({ force: true, v: true });
-    } catch (error) {
-      logger.error({ event: 'container_remove_error', error: String(error) });
+    } finally {
+      this.activeJobsCount--;
     }
   }
 }
