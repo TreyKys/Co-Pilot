@@ -26,13 +26,19 @@ export class StagehandEngine {
       logger.info({ event: 'stagehand_init_started' });
 
       // Dynamically import Stagehand to bypass CJS static import block for ESM-only packages
-      const { Stagehand } = await import('@browserbasehq/stagehand');
+      const { Stagehand, localBrowser, browserbase } = await import('@browserbasehq/stagehand');
 
-      // Create and initialize the Stagehand instance
-      stagehand = await Stagehand.create({
-        env: 'LOCAL',
-        modelName: 'gpt-4o-mini',
+      // Create and initialize the Stagehand instance using latest SDK
+      stagehand = new (Stagehand as any)({
+        browser: await localBrowser.launch(),
+        // Configure standard Gemini client compatible with Stagehand ClientLLM interface
+        llmClient: {
+           type: 'gemini',
+           modelName: 'gemini-2.5-flash',
+        }
       } as any);
+
+      await stagehand.init();
 
       logger.info({ event: 'stagehand_init_success' });
 

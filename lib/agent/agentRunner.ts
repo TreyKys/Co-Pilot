@@ -20,14 +20,18 @@ export async function executeProfileExtraction(
     logger.info({ event: 'stagehand_init_started' });
 
     // Dynamically import Stagehand to bypass CJS static import block for ESM-only packages
-    const { Stagehand } = await import('@browserbasehq/stagehand');
+    const { Stagehand, localBrowser } = await import('@browserbasehq/stagehand');
 
     // Create and initialize the Stagehand instance
-    stagehand = await Stagehand.create({
-      env: 'LOCAL',
-      modelName: 'gpt-4o-mini',
-      // We don't set apiKey here because it will automatically pick up process.env.OPENAI_API_KEY
+    stagehand = new (Stagehand as any)({
+      browser: await localBrowser.launch(),
+      llmClient: {
+         type: 'openai',
+         modelName: 'gpt-4o-mini',
+      }
     } as any);
+
+    await stagehand.init();
 
     logger.info({ event: 'stagehand_init_success' });
 
