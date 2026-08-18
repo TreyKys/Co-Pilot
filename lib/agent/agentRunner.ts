@@ -1,4 +1,3 @@
-import { Stagehand } from '@browserbasehq/stagehand';
 import { z } from 'zod';
 import { logger } from '../logger';
 
@@ -16,9 +15,12 @@ export async function executeProfileExtraction(
   cookieValue: string,
   targetUrl: string
 ): Promise<ProfileData | null> {
-  let stagehand: Stagehand | null = null;
+  let stagehand: any = null;
   try {
     logger.info({ event: 'stagehand_init_started' });
+
+    // Dynamically import Stagehand to bypass CJS static import block for ESM-only packages
+    const { Stagehand } = await import('@browserbasehq/stagehand');
 
     // Create and initialize the Stagehand instance
     stagehand = await Stagehand.create({
@@ -29,9 +31,7 @@ export async function executeProfileExtraction(
 
     logger.info({ event: 'stagehand_init_success' });
 
-    // The page property is available directly on the Stagehand instance, but its typings might be hidden.
-    // We access it directly and cast to any to avoid TypeScript errors while using the underlying Playwright API.
-    const page: any = (stagehand as any).page;
+    const page: any = stagehand.page;
     const context = page.context();
 
     // Inject the authentication cookie
@@ -53,15 +53,15 @@ export async function executeProfileExtraction(
 
     // Extract structured data using Stagehand's AI-driven extraction
     logger.info({ event: 'starting_extraction' });
-    const extractionResult = await stagehand.extract(
-      "Extract the person's full name, headline, location, a brief summary of their about section, and highlights of their experience.",
-      ProfileDataSchema
-    );
+    const extractionResult = await page.extract({
+      instruction: "Extract the person's full name, headline, location, a brief summary of their about section, and highlights of their experience.",
+      schema: ProfileDataSchema
+    });
 
     logger.info({ event: 'extraction_success' });
 
     // We have to extract the actual matched data, as Stagehand returns metadata alongside it
-    return extractionResult.data;
+    return extractionResult as unknown as ProfileData;
 
   } catch (error) {
     logger.error({ event: 'extraction_failed', error: String(error) });
