@@ -69,9 +69,21 @@ async function runHybridE2E() {
     // Process one job synchronously for the test
     await orchestrator.processNextJob();
 
-    // In our refactored orchestrator, processNextJob doesn't await processJob itself.
-    // Wait for the async processing to finish (hacky wait for demo)
-    await new Promise(resolve => setTimeout(resolve, 5000));
+    // Poll the database to check for job completion rather than a static timeout
+    let pollCount = 0;
+    while (pollCount < 20) {
+      await new Promise(resolve => setTimeout(resolve, 3000));
+      const { data: currentJob } = await supabase
+        .from('job_queue')
+        .select('status')
+        .eq('id', jobId)
+        .single();
+
+      if (currentJob && (currentJob.status === 'completed' || currentJob.status === 'failed')) {
+         break;
+      }
+      pollCount++;
+    }
 
   } catch (error: any) {
     logger.warn({
@@ -92,6 +104,10 @@ async function runHybridE2E() {
 
   if (finalJobError || !finalJob) {
     throw new Error(`[E2E] Failed to fetch final state for job ${jobId}`);
+  }
+
+  if (finalJob.status !== 'completed' && finalJob.status !== 'failed') {
+     throw new Error(`[E2E] Job is still in status: ${finalJob.status}`);
   }
 
   logger.info({ event: 'e2e_complete', message: '[E2E] Pipeline test completed.', status: finalJob.status, result: finalJob.result_payload });

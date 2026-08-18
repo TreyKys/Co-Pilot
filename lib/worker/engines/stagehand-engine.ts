@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { logger } from '../../logger';
+import { chromium } from 'playwright';
 
 export interface LinkedInProfileData {
   fullName: string;
@@ -26,7 +27,10 @@ export class StagehandEngine {
       logger.info({ event: 'stagehand_init_started' });
 
       // Dynamically import Stagehand to bypass CJS static import block for ESM-only packages
-      const { Stagehand, localBrowser, browserbase } = await import('@browserbasehq/stagehand');
+      const { Stagehand, localBrowser } = await import('@browserbasehq/stagehand');
+
+      // Programmatically set CHROME_PATH so stagehand's chrome-launcher doesn't crash
+      process.env.CHROME_PATH = chromium.executablePath();
 
       // Create and initialize the Stagehand instance using latest SDK
       stagehand = new (Stagehand as any)({
